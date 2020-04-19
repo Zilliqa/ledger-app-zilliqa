@@ -11,6 +11,29 @@
 
 static signTxnContext_t *ctx = &global.signTxnContext;
 
+// flags to check if fields are being decoded as required
+unsigned int field_decoded = 0;
+unsigned int first_time_ui_display = 0;
+
+// global fields for handling the streaming data
+StreamData *sd;
+pb_istream_t *_stream;
+pb_byte_t *_buf; 
+size_t _count;
+
+// fn declaration: function to handle streaming recursively
+bool handle_next_apdu();
+
+// macros for app labels
+#define SEND_TO_LABEL "sendto: "
+#define AMOUNT_LABEL "amount(ZIL): "
+#define GAS_PRICE_LABEL "gasprice(ZIL): "
+#define SCILLA_DATA_LABEL "data: "
+
+// app utils
+#define WHITE_SPACE " "
+
+
 // Define the approval screen. This is where the user will confirm that they
 // want to sign the hash. This UI layout is very common: a background, two
 // buttons, and two lines of text.
@@ -87,7 +110,7 @@ static const bagl_element_t ui_signHash_compare[] = {
 	// most apps use to indicate that the element should always be displayed.
 	// UI_BACKGROUND() also has userid == 0. And if you revisit the approval
 	// screen, you'll see that all of those elements have userid == 0 as well.
-	UI_TEXT(0x00, 0, 12, 128, "Compare txn:"),
+	UI_TEXT(0x00, 0, 12, 128, "Compare Txn:"),
 	UI_TEXT(0x00, 0, 26, 128, global.signTxnContext.partialMsg),
 };
 
@@ -163,15 +186,23 @@ static unsigned int ui_signHash_compare_button(unsigned int button_mask, unsigne
 		break;
 
 	case BUTTON_EVT_RELEASED | BUTTON_LEFT | BUTTON_RIGHT: // PROCEED
-		// Prepare to display the approval screen by printing the key index
-		// into the indexStr buffer. We copy two bytes in the final os_memmove
-		// so as to include the terminating '\0' byte for the string.
-		os_memmove(ctx->indexStr, "with Key #", 10);
-		int n = bin64b2dec(ctx->indexStr+10, sizeof(ctx->indexStr)-10, ctx->keyIndex);
-		os_memmove(ctx->indexStr+10+n, "?", 2);
-		// Note that because the approval screen does not have a preprocessor,
-		// we must pass NULL.
-		UX_DISPLAY(ui_signHash_approve, NULL);
+		// We only need to send an apdu response to the interpreter if there is more data to be streamed
+		// otherwise we risk terminating the current apdu transport pre-maturely
+		// see -> https://ledger.readthedocs.io/en/latest/userspace/application_structure.html
+		if (sd->hostBytesLeft) {
+			field_decoded = 0;
+			handle_next_apdu();
+		} else {
+			// Prepare to display the approval screen by printing the key index
+			// into the indexStr buffer. We copy two bytes in the final os_memmove
+			// so as to include the terminating '\0' byte for the string.
+			os_memmove(ctx->indexStr, "with Key #", 10);
+			int n = bin64b2dec(ctx->indexStr+10, sizeof(ctx->indexStr)-10, ctx->keyIndex);
+			os_memmove(ctx->indexStr+10+n, "?", 2);
+			// Note that because the approval screen does not have a preprocessor,
+			// we must pass NULL.
+			UX_DISPLAY(ui_signHash_approve, NULL); 
+		}
 		break;
 	}
 	// (The return value of a button handler is irrelevant; it is never
@@ -179,11 +210,66 @@ static unsigned int ui_signHash_compare_button(unsigned int button_mask, unsigne
 	return 0;
 }
 
+// This function will pause the data streaming and display the decoded data periodically
+void pause_streaming_display_decoded_info() {
+	// Prepare to display the comparison screen by converting the hash to hex
+	// and moving the first 12 characters into the partialMsg buffer.
+	os_memmove(ctx->partialMsg, ctx->msg, 12);
+	ctx->partialMsg[12] = '\0';
+	ctx->displayIndex = 0;
+
+	PRINTF("msg:    %.*H \n", ctx->msgLen, ctx->msg);
+    
+	// for the first time display draw the screen
+	if (first_time_ui_display == 1) {
+		PRINTF("FIRST TIME SCREEN DRAW\n");
+		// Call UX_DISPLAY to display the comparison screen, passing the
+		// corresponding preprocessor. You might ask: Why doesn't UX_DISPLAY
+		// also take the button handler as an argument, instead of using macro
+		// magic? To which I can only reply: ¯\_(ツ)_/¯
+		UX_DISPLAY(ui_signHash_compare, ui_prepro_signHash_compare);
+	} 
+	
+	if (first_time_ui_display == 2) {
+		//  for subsequent screens redraw the existing screen to save on memory
+		PRINTF("REDRAWING SCREEN\n");
+		UX_REDISPLAY();
+	}
+
+	// Set the IO_ASYNC_REPLY flag. This flag tells zil_main that we aren't
+	// sending data to the computer immediately; we need to wait for a button
+	// press first.
+
+	io_exchange(CHANNEL_APDU | IO_ASYNCH_REPLY, 0);
+}
+
 // Append msg to ctx->msg for display. THROW if out of memory.
 void append_ctx_msg (const char* msg, int msg_len)
 {
 	if (ctx->msgLen + msg_len >= sizeof(ctx->msg)) {
 		FAIL("Display memory full");
+	} else {
+		PRINTF("MSG IS: %s\n", msg);
+		// if a space is being appended it means the rest of the data has already been decoded
+		// so we can safely update this flag
+		if (msg == WHITE_SPACE) {
+		   field_decoded = 1;
+		}
+
+		// check if this is the first time the compare screen is being shown
+		if (msg == SEND_TO_LABEL) {
+			first_time_ui_display = 1;
+		}
+
+		if (msg ==  AMOUNT_LABEL || msg ==  GAS_PRICE_LABEL || msg ==  SCILLA_DATA_LABEL) { 
+			first_time_ui_display = 2;
+		}
+
+		// reset the display and clear the old info, once a new tx field is being displayed
+		if (msg == SEND_TO_LABEL || msg ==  AMOUNT_LABEL || msg ==  GAS_PRICE_LABEL || msg ==  SCILLA_DATA_LABEL) {
+			// init the display again for every new field
+			ctx->msgLen = 0;
+		}
 	}
 	
 	os_memcpy(ctx->msg + ctx->msgLen, msg, msg_len);
@@ -192,68 +278,98 @@ void append_ctx_msg (const char* msg, int msg_len)
 
 bool istream_callback (pb_istream_t *stream, pb_byte_t *buf, size_t count)
 {
-	StreamData *sd = stream->state;
+	sd = stream->state;
 	int bufNext = 0;
-
-	PRINTF("istream_callback: sd->nextIdx = %d\n", sd->nextIdx);
-	PRINTF("istream_callback: sd->len = %d\n", sd->len);
+	_stream = stream;
+	
+	// PRINTF("istream_callback: sd->nextIdx = %d\n", sd->nextIdx);
+	// PRINTF("istream_callback: sd->len = %d\n", sd->len);
 	int sdbufRem = sd->len - sd->nextIdx;
+	// PRINTF("istream_callback: sdbufRem = %d\n", sdbufRem);
 	if (sdbufRem > 0) {
 		// We have some data to spare.
 		int copylen = MIN(sdbufRem, count);
 		os_memcpy(buf, sd->buf + sd->nextIdx, copylen);
 		count -= copylen;
+		// PRINTF("istream_callback: count = %d\n", count);
 		bufNext += copylen;
 		sd->nextIdx += copylen;
-		PRINTF("Streamed %d bytes of data.\n", copylen);
+		// PRINTF("Streamed %d bytes of data.\n", copylen);
 	}
 
+	_buf = buf+bufNext;
+	_count = count;
+
 	if (count > 0) {
-		// More data to be streamed, but we've run out. Stream from host.
-		PRINTF("Still need to stream %d bytes of data.\n", count);
-		assert(sd->len == sd->nextIdx);
-		if (sd->hostBytesLeft) {
-			G_io_apdu_buffer[0] = 0x90;
-    	G_io_apdu_buffer[1] = 0x00;
-			unsigned rx = io_exchange(CHANNEL_APDU, 2);
-			uint32_t hostBytesLeftOffset = OFFSET_CDATA + 0;
-			uint32_t txnLenOffset = OFFSET_CDATA + 4;
-			uint32_t dataOffset = OFFSET_CDATA + 8;
+		// As the host computer is streaming data, keep on redrawing the screen
+		if (field_decoded == 1) {
+		    // After a protobuf tag has been successfully decoded, 
+		    // then pause the apdu loop/data streaming and display its info
 
-			uint32_t hostBytesLeft = U4LE(G_io_apdu_buffer, hostBytesLeftOffset);
-			uint32_t txnLen = U4LE(G_io_apdu_buffer, txnLenOffset);
-			PRINTF("istream_callback: io_exchanged %d bytes\n", rx);
-			PRINTF("istream_callback: hostBytesLeft: %d\n", hostBytesLeft);
-			PRINTF("istream_callback: txnLen: %d\n", txnLen);
-			if (txnLen > TXN_BUF_SIZE) {
-				FAIL("Cannot handle large data sent from host");
-			}
-			assert(hostBytesLeft <= ZIL_MAX_TXN_SIZE - txnLen);
-
-			// Update and move data to our state.
-			sd->len = txnLen;
-			os_memcpy(sd->buf, G_io_apdu_buffer + dataOffset, txnLen);
-			sd->hostBytesLeft = hostBytesLeft;
-			sd->nextIdx = 0;
-
-			// Take care of updating our signature state.
-			deriveAndSignContinue(&ctx->ecs, sd->buf, txnLen);
-
-			PRINTF("Making recursive call to stream after io_exchange\n");
-			return istream_callback(stream, buf+bufNext, count);
+		    pause_streaming_display_decoded_info();
 		} else {
-			// We need more data but can't fetch again. This is an error.
-			FAIL("Ran out of data to stream from host");
+			// More data to be streamed, but we've run out. Stream from host.
+			PRINTF("Still need to stream %d bytes of data.\n", count);
+			return handle_next_apdu();
 		}
 	}
 
 	return true;
 }
 
+// This function allows us to handle apdu calls and continue signing as the data is being streamed from the computer
+// or when the user approves
+bool handle_next_apdu() {
+
+	assert(sd->len == sd->nextIdx);
+	if (sd->hostBytesLeft) {
+		// make sure to handle the next apdu call
+		G_io_apdu_buffer[0] = 0x90;
+		G_io_apdu_buffer[1] = 0x00;
+		unsigned rx = io_exchange(CHANNEL_APDU, 2);
+		uint32_t hostBytesLeftOffset = OFFSET_CDATA + 0;
+		uint32_t txnLenOffset = OFFSET_CDATA + 4;
+		uint32_t dataOffset = OFFSET_CDATA + 8;
+
+		uint32_t hostBytesLeft = U4LE(G_io_apdu_buffer, hostBytesLeftOffset);
+		uint32_t txnLen = U4LE(G_io_apdu_buffer, txnLenOffset);
+	   
+	    PRINTF("txnLen =  %d\n", txnLen);
+		PRINTF("istream_callback: io_exchanged %d bytes\n", rx);
+		PRINTF("istream_callback: hostBytesLeft: %d\n", hostBytesLeft);
+		PRINTF("istream_callback: txnLen: %d\n", txnLen); 
+
+		if (txnLen > TXN_BUF_SIZE) {
+			FAIL("Cannot handle large data sent from host");
+		}
+		assert(hostBytesLeft <= ZIL_MAX_TXN_SIZE - txnLen);
+
+		// Update and move data to our state.
+		sd->len = txnLen;
+		PRINTF("sd->len =  %d\n", sd->len);
+		os_memcpy(sd->buf, G_io_apdu_buffer + dataOffset, txnLen);
+		sd->hostBytesLeft = hostBytesLeft;
+		sd->nextIdx = 0;
+
+		// Take care of updating our signature state.
+		deriveAndSignContinue(&ctx->ecs, sd->buf, txnLen);
+
+		PRINTF("Making recursive call to stream after io_exchange\n");
+		return istream_callback(_stream, _buf , _count);
+	
+	} else {
+		// We need more data but can't fetch again. This is an error.
+		FAIL("Ran out of data to stream from host");
+	}
+	
+}
+
+
 bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
 	char buf[PUB_ADDR_BYTES_LEN]; // This is the maximum size required.
 	assert(ZIL_AMOUNT_GASPRICE_BYTES <= PUB_ADDR_BYTES_LEN);
+	
 
   int readlen;
 	const char* tagread;
@@ -261,19 +377,19 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 	case ProtoTransactionCoreInfo_toaddr_tag:
 		PRINTF("decode_callback: toaddr\n");
 		readlen = PUB_ADDR_BYTES_LEN;
-		tagread = "sendto: ";
+		tagread = SEND_TO_LABEL;
 		break;
 	case ByteArray_data_tag:
 		switch ((int) *arg) {
 		case ProtoTransactionCoreInfo_amount_tag:
 			PRINTF("decode_callback: amount\n");
 			readlen = ZIL_AMOUNT_GASPRICE_BYTES;
-			tagread = "amount(ZIL): ";
+			tagread = AMOUNT_LABEL;
 			break;
 		case ProtoTransactionCoreInfo_gasprice_tag:
 			PRINTF("decode_callback: gasprice\n");
 			readlen = ZIL_AMOUNT_GASPRICE_BYTES;
-			tagread = "gasprice(ZIL): ";
+			tagread = GAS_PRICE_LABEL;
 			break;
 		default:
 			PRINTF("decode_callback: arg: %d\n", (int) *arg);
@@ -281,6 +397,11 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 			tagread = "";
 			FAIL("Unhandled ByteArray tag.");
 		}
+		break;
+	case ProtoTransactionCoreInfo_data_tag:
+		PRINTF("decode_callback: data\n");
+		readlen = SCILLA_TRANSITION_DATA_BYTES;
+		tagread = SCILLA_DATA_LABEL;
 		break;
 	default:
 		PRINTF("decode_callback: %d\n", field->tag);
@@ -293,6 +414,7 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 		PRINTF("decoded bytes: 0x%.*h\n", readlen, buf);
 		// Write data for display.
 		append_ctx_msg(tagread, strlen(tagread));
+		
 		if (readlen == PUB_ADDR_BYTES_LEN) {
 			char bech32_buf[76]; // max required for bech32_encode.
 			if (!bech32_addr_encode(bech32_buf, "zil", buf, PUB_ADDR_BYTES_LEN)) {
@@ -302,8 +424,8 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 				FAIL ("bech32 encoded address of incorrect length");
 			}
 			append_ctx_msg(bech32_buf, BECH32_ADDRSTR_LEN);
-		} else {
-			assert(readlen == ZIL_AMOUNT_GASPRICE_BYTES);
+		} 
+		if(readlen == ZIL_AMOUNT_GASPRICE_BYTES) {
 			// It is either gasprice or amount. a uint128_t value.
 			// Convert to decimal, appending a '\0'.
 			// ZIL data is big-endian, we need little-endian here.
@@ -332,8 +454,15 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 				FAIL("Error converting 128b unsigned to decimal");
 			}
 		}
-		append_ctx_msg(" ", 1);
+
+		// handle the scilla transition data
+		if (readlen == SCILLA_TRANSITION_DATA_BYTES) {
+			append_ctx_msg(buf, SCILLA_TRANSITION_DATA_BYTES);
+		}
+
+		append_ctx_msg(WHITE_SPACE, 1);
 		PRINTF("pb_read: read %d bytes\n", readlen);
+
 	} else {
 		PRINTF("pb_read failed\n");
 		return false;
@@ -343,18 +472,23 @@ bool decode_callback (pb_istream_t *stream, const pb_field_t *field, void **arg)
 }
 // Sign the txn, also deserializes parts of it. May call io_exchange multiple times.
 // Output: 1. Display message will be populated in ctx->msg.
-//         2. Signature will be populated in ctx->sdgnature.
+//         2. Signature will be populated in ctx->signature.
 bool sign_deserialize_stream(uint8_t *txn1, int txn1Len, int hostBytesLeft)
 {
 	// Initialize stream data.
 	os_memcpy(ctx->sd.buf, txn1, txn1Len);
-	ctx->sd.nextIdx = 0; ctx->sd.len = txn1Len; ctx->sd.hostBytesLeft = hostBytesLeft;
+	ctx->sd.nextIdx = 0; 
+	ctx->sd.len = txn1Len; 
+	ctx->sd.hostBytesLeft = hostBytesLeft;
 	assert(hostBytesLeft <= ZIL_MAX_TXN_SIZE - txn1Len);
-  // Setup the stream.
-	pb_istream_t stream = { istream_callback, &ctx->sd, hostBytesLeft + txn1Len, NULL };
 
 	// Initialize the display message.
 	ctx->msgLen = 0;
+
+    // Setup the stream.
+	pb_istream_t stream = { istream_callback, &ctx->sd, hostBytesLeft + txn1Len, NULL };
+
+	
 	// Initialize schnorr signing, continue with what we have so far.
 	deriveAndSignInit(&ctx->ecs, ctx->keyIndex);
 	deriveAndSignContinue(&ctx->ecs, txn1, txn1Len);
@@ -363,6 +497,8 @@ bool sign_deserialize_stream(uint8_t *txn1, int txn1Len, int hostBytesLeft)
 	ProtoTransactionCoreInfo txn = {};
 	// Set callbacks for handling the fields that what we need.
 	txn.toaddr.funcs.decode = decode_callback;
+	// For data
+	txn.data.funcs.decode = decode_callback;
 	// Since we're using the same callback for amount and gasprice,
 	// but the tag for both will be set to "ByteArray", we differentiate with "arg".
 	txn.amount.data.funcs.decode = decode_callback;
@@ -374,8 +510,14 @@ bool sign_deserialize_stream(uint8_t *txn1, int txn1Len, int hostBytesLeft)
 		PRINTF ("pb_decode successful\n");
 		deriveAndSignFinish(&ctx->ecs, ctx->keyIndex, ctx->signature, SCHNORR_SIG_LEN_RS);
 		PRINTF ("sign_deserialize_stream: signature: 0x%.*h\n", SCHNORR_SIG_LEN_RS, ctx->signature);
+
+		// redraw the screen with any more decoded info
+		pause_streaming_display_decoded_info();
 	} else {
 		PRINTF ("pb_decode failed\n");
+
+		// redraw the screen with any more decoded info
+		pause_streaming_display_decoded_info();
 		return false;
 	}
 
@@ -387,6 +529,7 @@ void handleSignTxn(uint8_t p1, uint8_t p2, uint8_t *dataBuffer, uint16_t dataLen
 	int dataHostBytesLeftOffset = 4; // offset for integer: is there more data (do io_exhange again)?
 	int dataTxnLenOffset = 8;     // offset for integer containing length of current txn
 	int dataOffset = 12;          // offset for actual transaction data.
+
 
 	uint8_t txndata[TXN_BUF_SIZE];
 	int txnLen, hostBytesLeft;
@@ -407,23 +550,4 @@ void handleSignTxn(uint8_t p1, uint8_t p2, uint8_t *dataBuffer, uint16_t dataLen
 	// Sign the txn and get message for confirmation display, all in ctx.
 	// Signature will not go back to host until message display + approval.
 	sign_deserialize_stream(txndata, txnLen, hostBytesLeft);
-
-	// Prepare to display the comparison screen by converting the hash to hex
-	// and moving the first 12 characters into the partialMsg buffer.
-	os_memmove(ctx->partialMsg, ctx->msg, 12);
-	ctx->partialMsg[12] = '\0';
-	ctx->displayIndex = 0;
-
-	PRINTF("msg:    %.*H \n", ctx->msgLen, ctx->msg);
-
-	// Call UX_DISPLAY to display the comparison screen, passing the
-	// corresponding preprocessor. You might ask: Why doesn't UX_DISPLAY
-	// also take the button handler as an argument, instead of using macro
-	// magic? To which I can only reply: ¯\_(ツ)_/¯
-	UX_DISPLAY(ui_signHash_compare, ui_prepro_signHash_compare);
-
-	// Set the IO_ASYNC_REPLY flag. This flag tells zil_main that we aren't
-	// sending data to the computer immediately; we need to wait for a button
-	// press first.
-	*flags |= IO_ASYNCH_REPLY;
 }

@@ -37,6 +37,8 @@
 #define BECH32_ADDRSTR_LEN (3 + 1 + 32 + 6)
 #define SCHNORR_SIG_LEN_RS 64
 #define ZIL_AMOUNT_GASPRICE_BYTES 16
+// arbitrary length in bytes of the scilla data
+#define SCILLA_TRANSITION_DATA_BYTES 24
 #define ZIL_MAX_TXN_SIZE 8388608 // 8MB
 // UINT128_MAX has 39 digits. Another 3 digits for "0." and '\0'.
 // ("0." is prepended when converted Qa to Zil).

@@ -35,6 +35,7 @@ typedef struct _ProtoTransactionCoreInfo {
     bool has_gaslimit;
     uint64_t gaslimit;
     pb_callback_t code;
+    bool has_data;
     pb_callback_t data;
 /* @@protoc_insertion_point(struct:ProtoTransactionCoreInfo) */
 } ProtoTransactionCoreInfo;

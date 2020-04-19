@@ -1,4 +1,4 @@
-# Zilliqa Nano S App 
+# Zilliqa Nano S App
   
 Zilliqa wallet application for Nano S.
 
@@ -39,7 +39,7 @@ Setup environment for building the app
   - `$export GCCPATH=${LEDGER_DIR}/devenv/gcc-arm-none-eabi-5_3-2016q1/bin/`
 
 Fetch and build the Zilliqa Ledger Nano-S app `app.hex` in `$ZIL_LEDGER_NANO_S/bin`
-  - `$cd $LEDGER_DIR; git clone https://github.com/CryptoAeon/zil-ledger-nano-s.git`
+  - `$cd $LEDGER_DIR; git clone https://github.com/Zilliqa/ledger-app-zilliqa.git`
   - (ledgerenv) ...`$make clean; make`
 
 An extra argument `DBG=1` can be provided to `make` to enable debug builds. This will enable printing of debugging messages through `PRINTF` when the [debug firmware](https://ledger.readthedocs.io/en/latest/userspace/debugging.html) is installed.
@@ -56,6 +56,19 @@ source ${LEDGER_DIR}/ledgerenv/bin/activate # activate python3 virtualenv
 On each of your development shell, just run the following command to setup the environment
 
   - `$source env.sh`
+
+### Docker
+For ease of building the zilliqa ledger app in any operating system, you can also use docker as follows
+- Install [Docker](https://www.docker.com/products/docker-desktop) in your system.
+- Open the project root folder i.e. ledger-app-zilliqa in a terminal and build the docker image via the command 
+    - ` docker build ./ -t zil`
+- Once the docker image is done building, connect to it via the command 
+    - `docker run --name zil --rm -it -v "$(pwd)"/.:/ziliqa/code zil`
+- Then run the setup the ledger environment via the command 
+    - `source scripts/env.sh`
+- Finally, change directory to the app folder and build it via the following command
+    - `cd code && make clean && DBG=1 make`
+Once the build process is done, the `app.hex` will be available in the auto-generated `bin/` folder, ready for installation as described in the [Python Test Utils Section](#python-test-utils)
 
 #### References
   - https://github.com/LedgerHQ/blue-loader-python

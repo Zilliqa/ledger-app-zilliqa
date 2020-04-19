@@ -39,7 +39,7 @@ typedef struct {
 	uint32_t keyIndex;
 	zil_ecschnorr_t ecs;
 	uint8_t signature[SCHNORR_SIG_LEN_RS];
-  StreamData sd;
+    StreamData sd;
 
 	// Used for display
 	uint8_t msg[512];
