@@ -4,4 +4,6 @@ dep
 obj
 src/glyphs.c
 src/glyphs.h
+.DS_Store
 compile_commands.json
+.vscode

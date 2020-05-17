@@ -80,7 +80,7 @@ void deriveAndSign(uint8_t *dst, uint32_t dst_len, uint32_t index, const uint8_t
     if (dst_len != SCHNORR_SIG_LEN_RS)
         THROW (INVALID_PARAMETER);
 
-    zil_ecschnorr_sign(&privateKey, msg, msg_len, dst, dst_len);
+   zil_ecschnorr_sign(&privateKey, msg, msg_len, dst, dst_len);
     PRINTF("deriveAndSign: signature: %.*H\n", SCHNORR_SIG_LEN_RS, dst);
 
     // Erase private keys for better security.

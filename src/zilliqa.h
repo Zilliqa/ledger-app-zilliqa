@@ -67,6 +67,7 @@ void print_available_stack();
 #define SCHNORR_SIG_LEN_RS 64
 #define ZIL_AMOUNT_GASPRICE_BYTES 16
 #define ZIL_MAX_TXN_SIZE 8388608 // 8MB
+
 // UINT128_MAX has 39 digits. Another 3 digits for "0." and '\0'.
 // ("0." is prepended when converted Qa to Zil).
 #define ZIL_UINT128_BUF_LEN 42
