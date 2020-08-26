@@ -67,6 +67,19 @@ On each of your development shell, just run the following command to setup the e
 
   - `$source env.sh`
 
+  ### Docker
+For ease of building the zilliqa ledger app in any operating system, you can also use docker as follows
+- Install [Docker](https://www.docker.com/products/docker-desktop) in your system.
+- Open the project root folder i.e. ledger-app-zilliqa in a terminal and build the docker image via the command 
+    - ` docker build ./ -t zil`
+- Once the docker image is done building, connect to it via the command 
+    - `docker run --name zil --rm -it -v "$(pwd)"/.:/ziliqa/code zil`
+- Then run the setup the ledger environment via the command 
+    - `source scripts/env.sh`
+- Finally, change directory to the app folder and build it via the following command
+    - `cd code && make clean && DBG=1 make`
+Once the build process is done, the `app.hex` will be available in the auto-generated `bin/` folder, ready for installation as described in the [Python Test Utils Section](#python-test-utils)
+
 #### References
   - https://github.com/LedgerHQ/blue-loader-python
   - https://ledger.readthedocs.io/en/latest/userspace/getting_started.html
